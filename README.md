@@ -25,6 +25,9 @@
   <img src="https://img.shields.io/badge/Minecraft-Java_Edition-62B47A?style=flat-square&logo=minecraft&logoColor=white" alt="Minecraft Java Edition">
 </p>
 
+> [!CAUTION]
+> **Внимание:** Этот репозиторий может быть временным и в дальнейшем может измениться или быть перенесён!
+
 **Fimple Launcher** — это лаунчер для **Minecraft Java Edition**, написанный на **Python** с интерфейсом на **PySide6 (Qt 6)**. Он объединяет установку версий и загрузчиков, управление Java, моды с Modrinth, несколько игровых инстансов и автоматические обновления в одном приложении.
 
 > [!TIP]
