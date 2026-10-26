@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+Minecraft/versions/
+Minecraft/assets/
+Minecraft/libraries/
+Minecraft/logs/
+Minecraft/cache/
+Minecraft/temp/
+Minecraft/instances/
+Minecraft/runtime/
+Minecraft/settings.json
+Minecraft/playtime.json
+.venv/
+venv/
