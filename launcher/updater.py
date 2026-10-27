@@ -16,6 +16,8 @@ REPO_URL = f"https://github.com/{REPO}"
 RELEASES_API = f"{GITHUB_API}/repos/{REPO}/releases"
 TAGS_API = f"{GITHUB_API}/repos/{REPO}/tags"
 USER_AGENT = "FimpleLauncher-Updater/1.0"
+JSON_ACCEPT = "application/vnd.github+json"
+BINARY_ACCEPT = "application/octet-stream"
 
 ProgressCB = Callable[[int, int, int], None]
 StatusCB = Callable[[str], None]
@@ -86,8 +88,8 @@ def _cmp(a: str, b: str) -> int:
     return 1 if va > vb else -1
 
 
-def _headers() -> dict:
-    h = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+def _headers(accept: str = JSON_ACCEPT) -> dict:
+    h = {"User-Agent": USER_AGENT, "Accept": accept}
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if token:
         h["Authorization"] = f"Bearer {token}"
@@ -153,6 +155,18 @@ def _latest_tag(current: str, s, timeout: float) -> UpdateInfo:
     return UpdateInfo(current, latest, None)
 
 
+def _verify_archive(path: Path) -> None:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            if not zf.namelist():
+                raise RuntimeError("Архив обновления пуст")
+    except zipfile.BadZipFile as e:
+        raise RuntimeError(
+            "Скачанный файл не является ZIP-архивом "
+            "(возможно, GitHub вернул страницу ошибки)"
+        ) from e
+
+
 def download_release(release: Release, progress: Optional[ProgressCB] = None,
                      status: Optional[StatusCB] = None) -> Path:
     import requests
@@ -161,10 +175,10 @@ def download_release(release: Release, progress: Optional[ProgressCB] = None,
     if not asset:
         raise RuntimeError("В релизе нет файлов для скачивания")
 
-    api_url = asset.get("url")
-    browser_url = asset.get("browser_download_url")
+    api_url = str(asset.get("url") or "")
+    browser_url = str(asset.get("browser_download_url") or "")
     tmp = paths.temp_dir()
-    name = str(asset.get("name") or "update.zip")
+    name = Path(str(asset.get("name") or "update.zip")).name or "update.zip"
     target = tmp / name
 
     if status:
@@ -173,8 +187,15 @@ def download_release(release: Release, progress: Optional[ProgressCB] = None,
     def do_download(url: str, headers: dict) -> None:
         downloaded = 0
         total = int(asset.get("size") or 0)
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
         with requests.get(url, headers=headers, stream=True, timeout=60) as r:
             r.raise_for_status()
+            ctype = str(r.headers.get("Content-Type") or "").lower()
+            if "application/json" in ctype or "text/html" in ctype:
+                raise RuntimeError(f"GitHub вернул {ctype} вместо файла архива")
             if not total:
                 total = int(r.headers.get("Content-Length") or 0)
             with open(target, "wb") as f:
@@ -187,14 +208,33 @@ def download_release(release: Release, progress: Optional[ProgressCB] = None,
                         progress(downloaded, total,
                                  int(downloaded * 100 / total) if total else 0)
 
-    if api_url and browser_url and not str(api_url).endswith("/zipball"):
-        do_download(api_url, _headers())
-    elif browser_url:
-        do_download(browser_url, {"User-Agent": USER_AGENT})
-    else:
-        do_download(api_url or browser_url, _headers())
+    sources = []
+    if api_url and not api_url.endswith("/zipball"):
+        # API GitHub отдаёт метаданные JSON, пока не запрошен бинарный файл.
+        sources.append((api_url, _headers(BINARY_ACCEPT)))
+    if browser_url:
+        sources.append((browser_url, {"User-Agent": USER_AGENT,
+                                      "Accept": BINARY_ACCEPT}))
+    if not sources:
+        sources.append((api_url or browser_url, _headers(BINARY_ACCEPT)))
 
-    return target
+    errors = []
+    for url, headers in sources:
+        if not url:
+            continue
+        try:
+            do_download(url, headers)
+            _verify_archive(target)
+            return target
+        except Exception as e:
+            errors.append(f"{e}")
+            utils.log(f"Не удалось скачать обновление с {url}: {e}", "WARN")
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    raise RuntimeError("Не удалось скачать обновление: " + "; ".join(errors))
 
 
 def _is_within(base: Path, target: Path) -> bool:

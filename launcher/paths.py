@@ -108,7 +108,7 @@ def app_version() -> str:
     baked = getattr(sys, "FIMPLE_VERSION", None)
     if baked:
         return str(baked)
-    return "13.1.0"
+    return "13.1.1"
 
 
 def app_root_entry() -> Path | None:
