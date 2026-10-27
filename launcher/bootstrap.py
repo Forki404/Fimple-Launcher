@@ -55,6 +55,7 @@ class Splash(QMainWindow):
         super().__init__()
         self.cfg = get_config()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.SplashScreen)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setFixedSize(560, 400)
         self._drag_pos: Optional[QPoint] = None
         self.update_info = None
@@ -147,7 +148,9 @@ class Splash(QMainWindow):
         self.actions.addWidget(self.btn_action)
         outer.addLayout(self.actions)
 
-        self.setStyleSheet(theme.stylesheet(self.cfg.get("accent")))
+        self.setStyleSheet(theme.stylesheet(self.cfg.get("accent")) +
+                           f"#Root{{background:{theme.BG};"
+                           f"border-radius:{theme.RADIUS_CARD}px;}}")
 
     def _log(self, text: str) -> None:
         self.log_line.setText(text)
