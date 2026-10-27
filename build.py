@@ -19,7 +19,7 @@ JAR_FILE = ROOT / "Minecraft" / "authlib-injector-1.2.7.jar"
 DIST_DIR = ROOT / "dist"
 BUILD_DIR = ROOT / "build"
 SPEC_DIR = BUILD_DIR / "spec"
-DEFAULT_VERSION = "13.0.0"
+DEFAULT_VERSION = "13.1.0"
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 
 
@@ -41,7 +41,7 @@ def ask_version() -> str:
         version = answer or current
         if VERSION_PATTERN.fullmatch(version):
             return version
-        print("Нужна версия из трёх чисел, например 13.0.0.")
+        print("Нужна версия из трёх чисел, например 13.1.0.")
 
 
 def save_version(version: str) -> None:

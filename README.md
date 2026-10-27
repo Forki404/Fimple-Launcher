@@ -73,7 +73,7 @@
 Внутри релизного архива:
 
 ```text
-Fimple Launcher 13.0.0.zip
+Fimple Launcher 13.1.0.zip
 ├── Fimple Launcher.exe
 ├── icon.ico
 ├── version.json
@@ -157,7 +157,7 @@ python build.py --onedir
 
 Если PyInstaller не установлен, `build.py` установит его автоматически. Готовый архив находится в корне проекта, exe — в папке `dist`.
 
-Чтобы выпустить обновление, создайте GitHub Release с тегом вида `v13.0.0` и прикрепите к нему полученный zip.
+Чтобы выпустить обновление, создайте GitHub Release с тегом вида `v13.1.0` и прикрепите к нему полученный zip.
 
 ---
 
