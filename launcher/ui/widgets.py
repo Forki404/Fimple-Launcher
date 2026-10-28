@@ -339,8 +339,10 @@ class RoundCheckBox(QCheckBox):
 
 
 class Badge(QLabel):
-    def __init__(self, text: str = "", color: str = "", parent=None):
+    def __init__(self, text: str = "", color: str = "", parent=None,
+                 compact: bool = False):
         super().__init__(text, parent)
+        self._compact = compact
         self.set_color(color or theme.INFO)
         self.setAlignment(Qt.AlignCenter)
         self.setFont(theme.ui_font(11, 700))
@@ -349,9 +351,10 @@ class Badge(QLabel):
     def set_color(self, color: str) -> None:
         c = QColor(color)
         bg = f"rgba({c.red()}, {c.green()}, {c.blue()}, 0.16)"
+        padding = "1px 5px" if self._compact else "3px 8px"
         self.setStyleSheet(
             f"background:{bg};color:{color};"
-            f"border-radius:{theme.RADIUS_BADGE}px;padding:3px 8px;"
+            f"border-radius:{theme.RADIUS_BADGE}px;padding:{padding};"
             "font-weight:700;font-size:11px;")
 
 

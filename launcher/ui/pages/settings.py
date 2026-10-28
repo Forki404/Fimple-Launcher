@@ -155,14 +155,15 @@ class SettingsPage(QWidget):
         top.setSpacing(7)
         top.addWidget(ElidedLabel(a.username, size=13, bold=True))
         top.addWidget(Badge("Ely.by" if a.type == "ely" else "offline",
-                            theme.SUCCESS if a.type == "ely" else theme.TEXT_MUTED))
+                            theme.SUCCESS if a.type == "ely" else theme.TEXT_MUTED,
+                            compact=True))
         box.addLayout(top)
         box.addWidget(ElidedLabel(a.uuid[:32], size=11, color=theme.TEXT_MUTED))
         h.addLayout(box, 1)
         if current and current.id == a.id:
             h.addWidget(Badge("✓", theme.SUCCESS))
         else:
-            btn = GhostButton(self.cfg.t("start"))
+            btn = GhostButton(self.cfg.t("select"))
             btn.setFixedWidth(80)
             btn.clicked.connect(lambda: self._select_account(a))
             h.addWidget(btn)
