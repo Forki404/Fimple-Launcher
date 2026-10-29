@@ -257,14 +257,27 @@ class Splash(QMainWindow):
 
         def work(ctx):
             archive = updater.download_release(rel, ctx.progress, ctx.status)
-            new_entry = updater.apply_update(archive, rel, status=ctx.status)
-            return str(new_entry)
+            return updater.apply_update(archive, rel, status=ctx.status)
 
         self.worker = background(work, on_result=self._update_done,
                                  on_error=self._update_error, parent=self)
 
-    def _update_done(self, entry: str):
+    def _update_done(self, result):
+        deferred = bool(getattr(result, "deferred", False))
+        entry = getattr(result, "entry", result)
         version = rel_version(self)
+
+        if deferred:
+            self.set_state("Обновление готово", f"Версия {version} · перезапуск…")
+            self.bar.setRange(0, 100)
+            self.bar.setValue(100)
+            self._log(f"Файлы будут заменены после закрытия: {entry}")
+            self.set_buttons(show=False)
+            self._update_done_flag = True
+            self._stage = "restart"
+            QTimer.singleShot(900, self._quit_for_update)
+            return
+
         write_version_file(version)
         self.set_state("Обновление установлено", f"Новая версия {version}")
         self.bar.setRange(0, 100)
@@ -274,6 +287,14 @@ class Splash(QMainWindow):
         self.btn_action.setEnabled(True)
         self._update_done_flag = True
         self._stage = "restart"
+
+    def _quit_for_update(self) -> None:
+        self._done = True
+        self._ticker.stop()
+        self.close()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _update_error(self, e: str) -> None:
         self.btn_action.setEnabled(True)

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
 import shutil
+import subprocess
+import sys
+import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +28,7 @@ ProgressCB = Callable[[int, int, int], None]
 StatusCB = Callable[[str], None]
 
 PRESERVE_DIRS = {"Minecraft"}
+REMOVE_DIRS = ("__pycache__", "launcher", "assets", "lib", "_internal")
 
 
 @dataclass
@@ -65,6 +71,18 @@ class UpdateInfo:
             return 0
         a = self.latest.pick_asset()
         return int(a.get("size") or 0) if a else 0
+
+
+@dataclass
+class ApplyResult:
+    entry: Path
+    deferred: bool = False
+
+    def __fspath__(self) -> str:
+        return os.fspath(self.entry)
+
+    def __str__(self) -> str:
+        return str(self.entry)
 
 
 def _vnums(v: str) -> tuple:
@@ -298,52 +316,267 @@ def _kill_running_launcher() -> None:
         pass
 
 
-def apply_update(archive: Path, release: Release, keep_data: bool = True,
-                 status: Optional[StatusCB] = None) -> Path:
-    base = paths.base_dir()
-    staging = paths.temp_dir() / "update"
-    if staging.exists():
-        shutil.rmtree(staging, ignore_errors=True)
-    extract_release(archive, staging, status=status)
+def _ps_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
 
-    new_entry = None
-    for cand in sorted(staging.iterdir()):
-        if cand.suffix.lower() in (".exe", ".bat", ".cmd") and cand.is_file():
-            new_entry = cand
+
+def _powershell_path() -> Optional[str]:
+    if os.name != "nt":
+        return None
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+    exe = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    if exe.is_file():
+        return str(exe)
+    return shutil.which("powershell.exe")
+
+
+def _launcher_pids() -> List[int]:
+    pids = [os.getpid()]
+    try:
+        import psutil
+
+        parent = psutil.Process(os.getpid()).parent()
+        if parent is None or parent.pid in pids:
+            return pids
+        try:
+            same_exe = (os.path.normcase(os.path.abspath(parent.exe()))
+                        == os.path.normcase(os.path.abspath(sys.executable)))
+        except (psutil.Error, OSError):
+            same_exe = False
+        if same_exe:
+            pids.append(parent.pid)
+    except Exception:
+        pass
+    return pids
+
+
+def _launch_command(entry: Path) -> List[str]:
+    if entry.suffix.lower() in (".exe", ".bat", ".cmd"):
+        return [str(entry)]
+    return utils.console_free_cmd([sys.executable, str(entry)])
+
+
+def _windows_update_script(base: Path, staging: Path, archive: Path,
+                           entry: Path, version: str, launch: List[str],
+                           ready: Path) -> str:
+    version_json = json.dumps(
+        {"version": version, "updated": int(time.time())}, indent=2) + "\n"
+    version_b64 = base64.b64encode(version_json.encode("utf-8")).decode("ascii")
+    wait_ids = ", ".join(str(pid) for pid in _launcher_pids())
+    args = ", ".join(_ps_quote(f'"{arg}"') for arg in launch[1:])
+    preserve = ", ".join(_ps_quote(name) for name in sorted(PRESERVE_DIRS))
+    old_dirs = ", ".join(_ps_quote(name) for name in REMOVE_DIRS)
+
+    lines = [
+        "$ErrorActionPreference = 'Stop'",
+        f"$target = {_ps_quote(str(base))}",
+        f"$staging = {_ps_quote(str(staging))}",
+        f"$archive = {_ps_quote(str(archive))}",
+        f"$entry = {_ps_quote(str(entry))}",
+        f"$version = {_ps_quote(version)}",
+        f"$ready = {_ps_quote(str(ready))}",
+        f"$launchFile = {_ps_quote(launch[0])}",
+        f"$launchArgs = @({args})",
+        f"$waitIds = @({wait_ids})",
+        f"$versionJson = [System.Text.Encoding]::UTF8.GetString("
+        f"[System.Convert]::FromBase64String({_ps_quote(version_b64)}))",
+        f"$preserve = @({preserve})",
+        f"$oldDirs = @({old_dirs})",
+        "$logDir = Join-Path $target 'Minecraft\\logs'",
+        "$log = Join-Path $logDir 'update.log'",
+        "",
+        "function Write-Log([string]$message) {",
+        "    try {",
+        "        if (-not (Test-Path -LiteralPath $logDir)) {",
+        "            New-Item -ItemType Directory -Path $logDir -Force | Out-Null",
+        "        }",
+        "        $line = '[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '] ' + $message",
+        "        Add-Content -LiteralPath $log -Value $line -Encoding UTF8",
+        "    } catch { }",
+        "}",
+        "",
+        "function Show-Error([string]$message) {",
+        "    Write-Log ('ERROR: ' + $message)",
+        "    try {",
+        "        $shell = New-Object -ComObject WScript.Shell",
+        "        $shell.Popup(($message + [Environment]::NewLine + [Environment]::NewLine + 'Подробности: ' + $log), 0, 'Fimple Launcher', 16) | Out-Null",
+        "    } catch { }",
+        "}",
+        "",
+        "function Remove-Old {",
+        "    Get-ChildItem -LiteralPath $target -Force | ForEach-Object {",
+        "        $name = $_.Name",
+        "        if ($preserve -contains $name) { return }",
+        "        if ($name.StartsWith('.')) { return }",
+        "        if ($_.PSIsContainer) {",
+        "            if ($oldDirs -contains $name) {",
+        "                Remove-Item -LiteralPath $_.FullName -Recurse -Force",
+        "            }",
+        "        } else {",
+        "            Remove-Item -LiteralPath $_.FullName -Force",
+        "        }",
+        "    }",
+        "}",
+        "",
+        "function Copy-New {",
+        "    robocopy $staging $target /E /R:3 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null",
+        "    $code = $LASTEXITCODE",
+        "    if (($null -eq $code) -or ($code -ge 8)) {",
+        "        throw ('robocopy завершился с кодом ' + $code)",
+        "    }",
+        "}",
+        "",
+        "try {",
+        "    Set-Content -LiteralPath $ready -Value $PID -Encoding ASCII",
+        "    Write-Log 'Начинаю установку обновления'",
+        "    foreach ($waitId in $waitIds) {",
+        "        try { Wait-Process -Id $waitId -Timeout 180 -ErrorAction SilentlyContinue } catch { }",
+        "    }",
+        "    Start-Sleep -Milliseconds 800",
+        "",
+        "    Get-Process -ErrorAction SilentlyContinue | Where-Object {",
+        "        try { $_.Path -and ((Split-Path -Parent $_.Path) -eq $target) } catch { $false }",
+        "    } | Stop-Process -Force -ErrorAction SilentlyContinue",
+        "",
+        "    $deadline = (Get-Date).AddSeconds(60)",
+        "    $done = $false",
+        "    while (-not $done) {",
+        "        try {",
+        "            if (Test-Path -LiteralPath $entry) {",
+        "                $stream = $null",
+        "                try {",
+        "                    $stream = [System.IO.File]::Open($entry, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)",
+        "                } finally {",
+        "                    if ($null -ne $stream) { $stream.Dispose() }",
+        "                }",
+        "            }",
+        "            Remove-Old",
+        "            Copy-New",
+        "            $done = $true",
+        "        } catch {",
+        "            if ((Get-Date) -gt $deadline) { throw }",
+        "            Start-Sleep -Milliseconds 500",
+        "        }",
+        "    }",
+        "",
+        "    $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false",
+        "    [System.IO.File]::WriteAllText((Join-Path $target 'version.json'), $versionJson, $utf8)",
+        "    Write-Log ('Скопировано: ' + $version)",
+        "",
+        "    if ($launchArgs.Count -gt 0) {",
+        "        Start-Process -FilePath $launchFile -ArgumentList $launchArgs -WorkingDirectory $target",
+        "    } else {",
+        "        Start-Process -FilePath $launchFile -WorkingDirectory $target",
+        "    }",
+        "    Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue",
+        "    Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue",
+        "    Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue",
+        "    Write-Log 'Обновление установлено, лаунчер запущен'",
+        "    exit 0",
+        "} catch {",
+        "    Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue",
+        "    Show-Error ('Не удалось установить обновление: ' + $_.Exception.Message + '. Закройте все окна лаунчера и запустите его снова.')",
+        "    exit 1",
+        "}",
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _schedule_windows_update(base: Path, staging: Path, archive: Path,
+                             entry: Path, version: str) -> None:
+    powershell = _powershell_path()
+    if not powershell:
+        raise RuntimeError("PowerShell не найден")
+
+    ready = paths.temp_dir() / (
+        f"update-helper-{os.getpid()}-{int(time.time() * 1000)}.ready")
+
+    launch = _launch_command(entry)
+    script = _windows_update_script(base, staging, archive, entry, version,
+                                    launch, ready)
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    cmd = [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+           "Bypass", "-WindowStyle", "Hidden", "-EncodedCommand", encoded]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    popen_args = dict(
+        cwd=str(base),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    try:
+        proc = subprocess.Popen(
+            cmd, creationflags=flags | 0x01000000, **popen_args)
+    except OSError:
+        proc = subprocess.Popen(cmd, creationflags=flags, **popen_args)
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if ready.is_file() and proc.poll() is None:
+            utils.log("Запущен отдельный процесс установки обновления")
+            return
+        if proc.poll() is not None:
             break
-    if new_entry is None:
-        new_entry = staging / "main.py"
+        time.sleep(0.1)
 
-    backup = base.parent / f"{base.name}.backup"
-    if backup.exists():
-        shutil.rmtree(backup, ignore_errors=True)
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:
+        pass
+    try:
+        ready.unlink(missing_ok=True)
+    except OSError:
+        pass
+    raise RuntimeError("Отдельный установщик не запустился")
 
+
+def _find_entry(staging: Path) -> Path:
+    for cand in sorted(staging.iterdir()):
+        if cand.is_file() and cand.suffix.lower() in (".exe", ".bat", ".cmd"):
+            return cand
+    return staging / "main.py"
+
+
+def _apply_in_process(base: Path, staging: Path, archive: Path,
+                      new_entry: Path, release: Release) -> Path:
     if os.name == "nt":
         _kill_running_launcher()
 
     for item in list(base.iterdir()):
         if item.name in PRESERVE_DIRS or item.name.startswith("."):
             continue
-        if item.is_dir() and item.name in ("__pycache__", "launcher", "assets", "lib"):
+        if item.is_dir() and item.name in REMOVE_DIRS:
             shutil.rmtree(item, ignore_errors=True)
             continue
-        if item.suffix.lower() in (".exe", ".py", ".spec", ".pyd", ".dll", ".zip") or item.is_file():
+        if item.is_file():
             try:
                 item.unlink()
             except OSError:
                 pass
 
-    for item in staging.iterdir():
-        dest = base / item.name
-        if item.is_dir():
-            shutil.copytree(item, dest, dirs_exist_ok=True)
-        else:
-            shutil.copy2(item, dest)
-            if dest.suffix.lower() in (".exe", ".bat", ".cmd"):
-                try:
-                    dest.chmod(0o755)
-                except OSError:
-                    pass
+    try:
+        for item in staging.iterdir():
+            dest = base / item.name
+            if item.is_dir():
+                shutil.copytree(item, dest, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, dest)
+                if dest.suffix.lower() in (".exe", ".bat", ".cmd"):
+                    try:
+                        dest.chmod(0o755)
+                    except OSError:
+                        pass
+    except (OSError, shutil.Error) as e:
+        if os.name == "nt" and (
+                getattr(e, "winerror", None) == 32 or "WinError 32" in str(e)
+                or "другим процессом" in str(e)):
+            raise RuntimeError(
+                "Не удалось заменить файлы лаунчера: они заняты другим "
+                "процессом. Закройте все копии лаунчера и повторите обновление."
+            ) from e
+        raise
 
     shutil.rmtree(staging, ignore_errors=True)
     try:
@@ -351,13 +584,37 @@ def apply_update(archive: Path, release: Release, keep_data: bool = True,
     except Exception:
         pass
     utils.log(f"Обновление {release.version} применено в {base}")
-    return new_entry
+    return base / new_entry.name
+
+
+def apply_update(archive: Path, release: Release, keep_data: bool = True,
+                 status: Optional[StatusCB] = None) -> ApplyResult:
+    base = paths.base_dir()
+    staging = paths.temp_dir() / "update"
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    extract_release(archive, staging, status=status)
+
+    new_entry = _find_entry(staging)
+    target_entry = base / new_entry.name
+
+    if os.name == "nt":
+        try:
+            _schedule_windows_update(base, staging, archive, target_entry,
+                                     release.version)
+            utils.log(
+                f"Обновление {release.version} будет установлено после выхода лаунчера")
+            return ApplyResult(target_entry, deferred=True)
+        except Exception as e:
+            utils.log(
+                f"Не удалось запустить отложенную установку ({e}); "
+                f"пробую заменить файлы на месте", "WARN")
+
+    entry = _apply_in_process(base, staging, archive, new_entry, release)
+    return ApplyResult(entry, deferred=False)
 
 
 def relaunch(entry: Optional[Path] = None) -> None:
-    import subprocess
-    import sys
-
     entry = entry or paths.app_root_entry()
     if not entry:
         return
